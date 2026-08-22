@@ -1,1 +1,7 @@
 .venv
+__pycache__/
+.DS_Store
+.ipynb_checkpoints/
+
+# nbconvert execution logs
+*_run.log
