@@ -5,3 +5,6 @@ __pycache__/
 
 # nbconvert execution logs
 *_run.log
+
+# notebook execution logs
+modelling/results/*.log
