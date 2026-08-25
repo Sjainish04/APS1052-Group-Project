@@ -1,0 +1,2 @@
+split_boundary,embargo_bdays,train_end,test_start,features
+2024-12-30,5,2024-12-23,2024-12-31,"ppo,roc_10,atr_norm,adx_14,intraday_range_pct,cmf_20,cmma_5,beta_60,idio_vol_60,sector_rel_21,vix_5d_change,stock_pcr,iv_skew,gex,bid_ask_spread,dow_1,dow_2,dow_3,dow_4,month_sin,month_cos"
