@@ -45,7 +45,7 @@ separate precisely so this notebook stays runnable by anyone.
 | Target: single quantity, asset, frequency | §2 |
 | ≥15 indicators, **≥half not from the target's OHLCV bar** | §3–§5 |
 | Feature selection; discard the worst 1–2 | §9 |
-| ≥5 models, ≥1 requiring scaled inputs | §13 |
+| ≥5 models, ≥1 requiring scaled inputs | §13 (eleven) |
 | Manual grid-search CV loop, always `TimeSeriesSplit` | §11, §14 |
 | `StandardScaler` / `SelectKBest` **inside** the pipeline | §13 |
 | Neural net: loss, penalties, sample weights | §13 |
@@ -114,11 +114,12 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import (SelectKBest, f_regression,
                                        mutual_info_regression)
-from sklearn.linear_model import ElasticNet, Ridge
+from sklearn.linear_model import ElasticNet, Ridge, Lasso
 from sklearn.ensemble import (RandomForestRegressor, ExtraTreesRegressor,
                               HistGradientBoostingRegressor)
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.svm import SVR
+from sklearn.cross_decomposition import PLSRegression
 from lightgbm import LGBMRegressor
 
 warnings.filterwarnings("ignore")
@@ -886,10 +887,10 @@ def wrap(est):
 
 # ==========================================================================
 md(r"""
-## §13. The nine models
+## §13. The eleven models
 
 At least five with at least one requiring scaled inputs is the brief's floor.
-Nine are run, spanning **four genuinely different inductive biases**, so that
+Eleven are run, spanning **five genuinely different inductive biases**, so that
 whichever family wins is a finding rather than an artefact of only having tried
 one kind of model.
 
@@ -897,7 +898,8 @@ one kind of model.
 |---|---|---|
 | Boosted trees | LightGBM, HistGBM | no — native NaN handling |
 | Bagged trees | RandomForest, ExtraTrees | no |
-| Penalised linear | Ridge, ElasticNet | **yes** |
+| Penalised linear | Ridge, ElasticNet, Lasso | **yes** |
+| Latent factor | PLS | **yes** |
 | Kernel / distance / neural | SVR, kNN, Keras MLP | **yes** |
 
 `StandardScaler` and `SelectKBest` are **pipeline steps, refit inside every
@@ -937,6 +939,19 @@ class KerasMLP(BaseEstimator, RegressorMixin):
         from keras import layers, regularizers
         keras.utils.set_random_seed(self.seed)
         X = np.asarray(X,dtype="float32"); y = np.asarray(y,dtype="float32").ravel()
+
+        # Rows arrive TICKER-MAJOR (every date of one ticker, then the next), and
+        # Keras' validation_split carves the LAST fraction of rows BEFORE any
+        # shuffling. Early stopping was therefore always scored on the same ~3
+        # alphabetical tickers (WRBY/WSBC/XPO) across ALL dates -- not the
+        # "chronological tail" an earlier comment claimed -- and shuffle=False
+        # made every batch a single ticker's contiguous block. Permuting with a
+        # seed makes the 15% early-stopping slice an unbiased sample of names and
+        # dates; every row is still a training-fold row, so nothing leaks.
+        rng = np.random.default_rng(self.seed)
+        perm = rng.permutation(len(X))
+        X, y = X[perm], y[perm]
+
         net = keras.Sequential([keras.Input(shape=(X.shape[1],))])
         for h in self.hidden:
             net.add(layers.Dense(h, activation="relu",
@@ -949,7 +964,7 @@ class KerasMLP(BaseEstimator, RegressorMixin):
         if self.sample_weighting:
             w = np.abs(y); w = w/w.mean() if w.mean()>0 else np.ones_like(y)
         net.fit(X, y, sample_weight=w, epochs=self.epochs, batch_size=self.batch_size,
-                verbose=0, shuffle=False, validation_split=0.15,
+                verbose=0, shuffle=True, validation_split=0.15,
                 callbacks=[keras.callbacks.EarlyStopping(monitor="val_loss",
                            patience=self.patience, restore_best_weights=True)])
         self.model_ = net; return self
@@ -988,6 +1003,15 @@ MODELS = {
     "grid": [{"select__k":k,"model__alpha":a,"model__l1_ratio":l1}
              for k in (15,K) for a in (1e-4,1e-3,1e-2) for l1 in (0.15,0.9)],
     "family":"penalised linear","scaled":True},
+ "Lasso": {"factory": lambda: wrap(Pipeline([IMPUTE(), SCALE(),
+        ("select", SelectKBest(score_func=f_regression)),
+        ("model", Lasso(max_iter=5000, random_state=RANDOM_STATE))])),
+    "grid": [{"select__k":k,"model__alpha":a} for k in (15,K) for a in (1e-5,1e-4,1e-3)],
+    "family":"penalised linear","scaled":True},
+ "PLS": {"factory": lambda: wrap(Pipeline([IMPUTE(), SCALE(),
+        ("model", PLSRegression())])),
+    "grid": [{"model__n_components":n} for n in (1,2,3,5,8)],
+    "family":"latent factor","scaled":True},
  "SVR": {"factory": lambda: wrap(Pipeline([IMPUTE(), SCALE(),
         ("select", SelectKBest(score_func=mi_score)), ("model", SVR(kernel="rbf", cache_size=1000))])),
     "grid": [{"select__k":k,"model__C":c,"model__epsilon":e,"model__gamma":"scale"}
@@ -1039,33 +1063,46 @@ def build(spec, params):
     if params: est.set_params(**{f"regressor__{k}": v for k,v in params.items()})
     return est
 
-def cv_oof(spec, params, X, y_fit, y_true, dates, cv):
-    total, count = np.zeros(len(y_true)), np.zeros(len(y_true))
-    for tr, va in cv.split(X, y_true, groups=dates):
-        est = build(spec, params); est.fit(X.iloc[tr], y_fit[tr])
+def _fold_fit_target(y_raw, tr, winsor_sd=WINSOR_SD):
+    """Winsorise using ONLY the training fold's own scale.
+
+    Clipping once on the whole training block would set the threshold using
+    validation-fold data. Small, but it is a leak, and it costs nothing to close.
+    """
+    sd_ = y_raw[tr].std()
+    return np.clip(y_raw[tr], -winsor_sd*sd_, winsor_sd*sd_)
+
+def cv_oof(spec, params, X, y_raw, dates, cv):
+    total, count = np.zeros(len(y_raw)), np.zeros(len(y_raw))
+    for tr, va in cv.split(X, y_raw, groups=dates):
+        est = build(spec, params); est.fit(X.iloc[tr], _fold_fit_target(y_raw, tr))
         total[va] += est.predict(X.iloc[va]); count[va] += 1
     return np.where(count>0, total/np.maximum(count,1), np.nan)
 
-def fold_scores(spec, params, X, y_fit, y_true, dates, cv):
+def fold_scores(spec, params, X, y_raw, dates, cv):
     out = []
-    for tr, va in cv.split(X, y_true, groups=dates):
-        est = build(spec, params); est.fit(X.iloc[tr], y_fit[tr])
-        ic,_,_,_ = rank_ic(y_true[va], est.predict(X.iloc[va]), dates[va])
+    for tr, va in cv.split(X, y_raw, groups=dates):
+        est = build(spec, params); est.fit(X.iloc[tr], _fold_fit_target(y_raw, tr))
+        ic,_,_,_ = rank_ic(y_raw[va], est.predict(X.iloc[va]), dates[va])
         out.append(ic if np.isfinite(ic) else 0.0)
     return np.asarray(out)
 
-def run_roster(roster, X, y_fit, y_true, dates, cv):
+def run_roster(roster, X, y_raw, dates, cv):
     results = {}
     for name, spec in roster.items():
         t0, best = time.time(), None
         for params in spec["grid"]:
-            ics = fold_scores(spec, params, X, y_fit, y_true, dates, cv)
-            if best is None or ics.mean() > best["mean_fold_ic"]:
+            ics = fold_scores(spec, params, X, y_raw, dates, cv)
+            # A non-finite incumbent must be displaced explicitly: (x > nan) is
+            # always False, so a NaN first configuration would otherwise stick as
+            # "best" for the entire remaining grid.
+            if (best is None or not np.isfinite(best["mean_fold_ic"])
+                    or (np.isfinite(ics.mean()) and ics.mean() > best["mean_fold_ic"])):
                 best = {"params":params, "mean_fold_ic":float(ics.mean()),
                         "fold_ic_se":float(ics.std(ddof=1)/np.sqrt(len(ics))), "fold_ics":ics}
-        best["oof"] = cv_oof(spec, best["params"], X, y_fit, y_true, dates, cv)
+        best["oof"] = cv_oof(spec, best["params"], X, y_raw, dates, cv)
         m = np.isfinite(best["oof"])
-        rep = report(y_true[m], best["oof"][m], dates[m], label=name, verbose=False)
+        rep = report(y_raw[m], best["oof"][m], dates[m], label=name, verbose=False)
         results[name] = {**best, **rep, "family":spec["family"]}
         print(f"  {name:16s} meanFoldIC {best['mean_fold_ic']:+.4f} "
               f"(se {best['fold_ic_se']:.4f})  positive in "
@@ -1073,12 +1110,12 @@ def run_roster(roster, X, y_fit, y_true, dates, cv):
               f"[{time.time()-t0:.0f}s]")
     return results
 
-print("Baselines:");  base_results = run_roster(BASELINES, X_tr, y_tr_w, y_tr, d_tr, CV)
+print("Baselines:");  base_results = run_roster(BASELINES, X_tr, y_tr, d_tr, CV)
 bsf = build(BASELINES["BestSingleFeature"], {}); bsf.fit(X_tr, y_tr_w)
 print(f"\n  BestSingleFeature picked: {bsf.regressor_.feature_} "
       f"(train PF {bsf.regressor_.pf_:.4f}, sign {'+' if bsf.regressor_.sign_>0 else '-'})")
 print("\nModels:"); t0 = time.time()
-results = run_roster(MODELS, X_tr, y_tr_w, y_tr, d_tr, CV)
+results = run_roster(MODELS, X_tr, y_tr, d_tr, CV)
 print(f"\ncompleted in {(time.time()-t0)/60:.1f} min")
 ''')
 
@@ -1102,8 +1139,8 @@ be able to lose.
 """)
 
 code(r'''
-COMPLEXITY = {"baseline":0,"penalised linear":1,"distance":2,"bagged trees":3,
-              "kernel":4,"boosted trees":5,"neural":6}
+COMPLEXITY = {"baseline":0,"penalised linear":1,"latent factor":2,"distance":3,
+              "bagged trees":4,"kernel":5,"boosted trees":6,"neural":7}
 all_results = {**base_results, **results}
 tab = pd.DataFrame([{"model":n, "family":r["family"], "mean_fold_ic":r["mean_fold_ic"],
                      "fold_ic_se":r["fold_ic_se"],
@@ -1172,6 +1209,9 @@ FINE = {
                   for a in (3e-4,1e-3,3e-3,1e-2) for l1 in (0.1,0.5,0.9)],
  "SVR":          [dict(base_params, **{"model__C":c,"model__epsilon":e})
                   for c in (0.05,0.1,0.3) for e in (0.02,0.05,0.1)],
+ "Lasso":        [dict(base_params, **{"model__alpha":a})
+                  for a in (3e-6,1e-5,3e-5,1e-4,3e-4)],
+ "PLS":          [dict(base_params, **{"model__n_components":n}) for n in (1,2,3,4,6,10)],
  "kNN":          [dict(base_params, **{"model__n_neighbors":nn}) for nn in (200,400,600,800,1200)],
  "KerasMLP":     [dict(base_params, **{"model__dropout":dr,"model__l2":l2})
                   for dr in (0.2,0.3,0.4) for l2 in (1e-3,1e-2)],
@@ -1180,7 +1220,7 @@ FINE = [base_params] + [f for f in FINE if f != base_params]   # incumbent alway
 
 best_fine, t0 = None, time.time()
 for params in FINE:
-    ics = fold_scores(spec, params, X_tr, y_tr_w, y_tr, d_tr, CV)
+    ics = fold_scores(spec, params, X_tr, y_tr, d_tr, CV)
     if best_fine is None or ics.mean() > best_fine["ic"]:
         best_fine = {"params":params, "ic":float(ics.mean()),
                      "se":float(ics.std(ddof=1)/np.sqrt(len(ics))), "ics":ics}
@@ -1192,7 +1232,7 @@ print(f"  best mean fold IC {best_fine['ic']:+.4f} (se {best_fine['se']:.4f}), "
       f"positive in {int((best_fine['ics']>0).sum())}/5 folds")
 print(f"  params: {best_fine['params']}")
 FINAL_PARAMS = best_fine["params"]
-oof_final = cv_oof(spec, FINAL_PARAMS, X_tr, y_tr_w, y_tr, d_tr, CV)
+oof_final = cv_oof(spec, FINAL_PARAMS, X_tr, y_tr, d_tr, CV)
 ''')
 
 # ==========================================================================
@@ -1671,11 +1711,11 @@ rows5, params5 = [], {}
 for name, sp in MODELS.items():
     best = None
     for prm in sp["grid"]:
-        ics = fold_scores(sp, prm, X5_tr, y5_tr_w, y5_tr, d5_tr, CV5)
+        ics = fold_scores(sp, prm, X5_tr, y5_tr, d5_tr, CV5)
         if best is None or ics.mean() > best["ic"]:
             best = {"params":prm, "ic":float(ics.mean()),
                     "se":float(ics.std(ddof=1)/np.sqrt(len(ics))), "ics":ics}
-    oof = cv_oof(sp, best["params"], X5_tr, y5_tr_w, y5_tr, d5_tr, CV5)
+    oof = cv_oof(sp, best["params"], X5_tr, y5_tr, d5_tr, CV5)
     mk = np.isfinite(oof)
     _, t_ov, _, _ = rank_ic(y5_tr[mk], oof[mk], d5_tr[mk])
     _, t_no, nd_no, _ = nonoverlap_ic(y5_tr[mk], oof[mk], d5_tr[mk])
