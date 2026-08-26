@@ -8,3 +8,4 @@ __pycache__/
 
 # notebook execution logs
 modelling/results/*.log
+final_run.log

@@ -1,0 +1,119 @@
+{
+ "universe": [
+  "FLEX",
+  "TWLO",
+  "FTI",
+  "CW",
+  "NVT",
+  "STRL",
+  "XPO",
+  "EWBC",
+  "RGA",
+  "EVR",
+  "BLKB",
+  "CNXC",
+  "CACC",
+  "LAZ",
+  "EBC",
+  "WSBC",
+  "WRBY",
+  "LQDA",
+  "RSI",
+  "USLM"
+ ],
+ "panel": [
+  "2022-01-03",
+  "2025-08-29"
+ ],
+ "test_start": "2024-09-03",
+ "features": {
+  "total": 38,
+  "bar": 13,
+  "exogenous": 18,
+  "calendar": 7,
+  "pct_not_own_bar": 0.658,
+  "dropped": [
+   "mom_21",
+   "pc_oi"
+  ]
+ },
+ "models_tried": [
+  "LightGBM",
+  "HistGBM",
+  "RandomForest",
+  "ExtraTrees",
+  "Ridge",
+  "ElasticNet",
+  "SVR",
+  "kNN",
+  "KerasMLP"
+ ],
+ "baselines": [
+  "ZeroPredictor",
+  "RandomPredictor",
+  "BestSingleFeature"
+ ],
+ "winner": "HistGBM",
+ "final_params": {
+  "max_leaf_nodes": "15",
+  "learning_rate": "0.05",
+  "min_samples_leaf": "100",
+  "l2_regularization": "10.0"
+ },
+ "null_95": [
+  -0.016994454549517223,
+  0.01652640879079831
+ ],
+ "validation": {
+  "MAE": 0.015685143037522355,
+  "ProfitFactor": 1.0799615154479105,
+  "RankIC": 0.03751416438409485,
+  "RankIC_t": 3.3387663573957296,
+  "DirAcc": 51.327272727272735,
+  "Skill": 0.7090909090909179
+ },
+ "test": {
+  "MAE": 0.014919392524702556,
+  "ProfitFactor": 1.0065484207807582,
+  "RankIC": -0.02826256406182686,
+  "RankIC_t": -1.853849101209667,
+  "DirAcc": 49.09274193548387,
+  "Skill": -1.0887096774193523
+ },
+ "test_net_spread": {
+  "AnnRet": -0.19602238839029296,
+  "AnnVol": 0.1313155376478211,
+  "Sharpe": -1.6615235360237546,
+  "PF": 0.7547316059961396,
+  "CAGR": -0.19602238839029307,
+  "MaxDD": -0.24951609791648371,
+  "HitRate": 0.43548387096774194,
+  "Skew": 0.4633858704209936
+ },
+ "test_gross": {
+  "AnnRet": -0.09125718315565556,
+  "AnnVol": 0.13162775960138992,
+  "Sharpe": -0.7269982782569683,
+  "PF": 0.8839295051652574,
+  "CAGR": -0.09125718315565567,
+  "MaxDD": -0.18265178687460365,
+  "HitRate": 0.4717741935483871,
+  "Skew": 0.4616732632857894
+ },
+ "capm": {
+  "beta": -0.008290605453728004,
+  "alpha_ann": -0.21703983312651945,
+  "alpha_t": -1.639768800738619
+ },
+ "whites_reality_check": {
+  "single_p": 0.5158,
+  "best_of_models_p_mean": 0.7798,
+  "best_of_models_p_sharpe": 0.779,
+  "B": 5000
+ },
+ "mcpt": {
+  "p_profit_factor": 0.7562,
+  "p_mean_spread": 0.766,
+  "B": 5000
+ }
+}
